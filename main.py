@@ -521,7 +521,7 @@ class GeneticAlgorithm:
             'survival_rate': 0.2, # Percentage of best genomes to survive per species
             'stagnation_threshold': 15, # Generations a species can go without improvement before extinction
             'min_species_size': 2, # Minimum number of genomes in a species
-            'elitism_species_count': 1
+            'elitism_species_count': 1 # Number of top species to always preserve
         }
         if config:
             self.config.update(config)
@@ -755,7 +755,7 @@ class GeneticAlgorithm:
         
         return child
 
-    def _apply_random_mutation(self, genome):
+    def _mutate(self, genome):
         """Applies various mutations to a genome."""
         # Weight mutation
         if genome.connections:
@@ -797,12 +797,9 @@ class GeneticAlgorithm:
         return new_genome
 
 
-    def evolve(self, fitness_evaluator_func): # Now accepts fitness_evaluator_func
+    def evolve(self): # No generations parameter here, as it's called once per global generation
         """
         Evolves all populations for one generation, including inter-population replacement.
-        Args:
-            fitness_evaluator_func (callable): A function that takes a genome and returns its fitness.
-                                               Used for evaluating mutations.
         """
         self.global_generation += 1
         
@@ -884,31 +881,7 @@ class GeneticAlgorithm:
                     parent1 = random.choice(species_obj.members[:num_survivors])
                     parent2 = random.choice(species_obj.members[:num_survivors])
                     child = self._crossover(parent1, parent2)
-                    
-                    # --- Gradient Descent-like Mutation (Trial and Revert) ---
-                    # Evaluate child's fitness before mutation.
-                    # We clone here to ensure the evaluation doesn't modify the child before mutation.
-                    original_child_genome_clone = child.clone()
-                    original_child_fitness = fitness_evaluator_func(original_child_genome_clone)
-
-                    # Apply mutation to the actual child genome
-                    self._apply_random_mutation(child)
-
-                    # Evaluate mutated child's fitness
-                    mutated_child_fitness = fitness_evaluator_func(child)
-
-                    # Decide whether to keep or revert the mutation
-                    if mutated_child_fitness < original_child_fitness:
-                        # Revert: restore original structure and fitness
-                        child.set_genes(*original_child_genome_clone.get_genes())
-                        child.fitness = original_child_fitness
-                        # print(f"Mutation reverted. Original: {original_child_fitness:.2f}, Mutated: {mutated_child_fitness:.2f}")
-                    else:
-                        # Keep: update fitness to the improved/neutral value
-                        child.fitness = mutated_child_fitness
-                        # print(f"Mutation kept. Original: {original_child_fitness:.2f}, Mutated: {mutated_child_fitness:.2f}")
-                    # --- End Gradient Descent-like Mutation ---
-
+                    self._mutate(child)
                     new_sub_population.append(child)
 
             while len(new_sub_population) < self.agents_per_population:
@@ -956,7 +929,7 @@ class GeneticAlgorithm:
 
 
         # Step 2: Periodic population replacement
-        if self.global_generation % 50 == 0: # Changed from 10 to 50
+        if self.global_generation % 10 == 0:
             print(f"--- Global Generation {self.global_generation}: Performing population replacement ---")
             # Get best fitness for each population
             population_scores = []
@@ -1012,7 +985,7 @@ class GeneticAlgorithm:
                     
                     new_prototype = self._crossover(parent1, parent2)
                     # Apply some mutation to the new prototype to ensure diversity
-                    self._apply_random_mutation(new_prototype) # Use the new mutation method
+                    self._mutate(new_prototype)
                     new_prototypes.append(new_prototype)
 
                 # Replace the two worst populations
@@ -1669,7 +1642,7 @@ class LunarLanderSimulation:
                 # This means it gets the proximity and time survival bonuses, but no negative crash score.
                 # We should ensure it doesn't get the SUCCESSFUL_LANDING_BONUS if it actually crashed.
                 # So, it's just the 'flying' fitness.
-                # print("Ignoring crash penalty for agent.") # Removed for less console spam
+                print("Ignoring crash penalty for last agent.")
                 return fitness, False # Not a successful landing, but no penalty
             
             # Original crash penalty logic if not ignoring
@@ -1910,54 +1883,6 @@ class LunarLanderSimulation:
         # Draw final vertical lines (rightmost)
         final_x_pos = overlay_x + padding_x + table_width
         pygame.draw.line(screen, DARK_GRAY, (final_x_pos, header_y), (final_x_pos, current_y), 1)
-
-
-    def evaluate_single_genome_fitness(self, genome_to_evaluate):
-        """
-        Runs a headless simulation for a single genome to determine its fitness.
-        This is used for evaluating mutations in a "gradient descent" manner.
-        """
-        lander = Lander(self.lander_start_x, self.lander_start_y)
-        lander.reset(self.lander_start_x, self.lander_start_y) # Reset lander state for this evaluation
-
-        current_time_ms = 0
-        dt_eval = 16 # Fixed small dt for consistent evaluation (approx 60 FPS)
-
-        while not lander.landed and not lander.crashed and current_time_ms < MAX_SIMULATION_TIME_MS:
-            nn_inputs = self._get_lander_state_for_nn(lander)
-            nn_outputs = genome_to_evaluate.forward(nn_inputs, normalization_method='none')
-
-            lander.thrust_main_power_input = max(0.0, min(1.0, nn_outputs[0]))
-            lander.angular_velocity_target_input = max(-1.0, min(1.0, nn_outputs[1]))
-
-            lander.update(dt_eval)
-            current_time_ms += dt_eval
-
-            # Check for crashes during this mini-simulation
-            crash_occurred = False
-            crash_type = None
-            if lander.y < 0:
-                crash_occurred = True
-                crash_type = 'early_top_crash' if lander.time_elapsed_ms < 3000 else 'out_of_bounds_crash'
-            elif self.terrain.check_collision(lander):
-                crash_occurred = True
-                crash_type = 'ground_crash'
-            elif abs(lander.angle) > MAX_FLIGHT_ANGLE_RAD:
-                crash_occurred = True
-                crash_type = 'angle_crash'
-            elif lander.x < 0 or lander.x > self.screen_width or lander.y > self.screen_height + 50:
-                crash_occurred = True
-                crash_type = 'out_of_bounds_crash'
-            
-            if crash_occurred:
-                lander.crashed = True
-                lander.crash_reason = crash_type
-                break # End mini-simulation on crash
-
-        # Calculate final fitness for this single genome
-        # No 'ignore_crash_penalty' here, as this is the direct fitness evaluation for mutation acceptance
-        fitness, _ = self._calculate_fitness(lander, dt_eval, crash_reason=lander.crash_reason)
-        return fitness
 
 
     def run_generation_simulation(self): # Removed genomes parameter
@@ -2303,8 +2228,10 @@ class LunarLanderSimulation:
             # The fitnesses are assigned directly within run_generation_simulation
             overall_best_genome_this_gen_from_sim = self.run_generation_simulation()
 
-            # Evolve all populations, passing the fitness evaluator for mutation acceptance
-            overall_best_genome_after_evolve = self.neat_ga.evolve(self.evaluate_single_genome_fitness)
+            # Evolve all populations
+            # The evolve method now handles speciation, reproduction, and population replacement
+            # It also prints generation info internally.
+            overall_best_genome_after_evolve = self.neat_ga.evolve()
 
             # Update the best genome for display (overall best found so far)
             if not self.best_genome_for_display or overall_best_genome_after_evolve.fitness > self.best_genome_for_display.fitness:
